@@ -267,39 +267,40 @@ Công thức chuyển đổi:
 
 ```mermaid
 flowchart TD
-    A["🚀 Khởi động ứng dụng<br/>QApplication"] --> B["🔐 LoginWindow<br/>Nhập username/password"]
-    B --> C{{"Kiểm tra<br/>username/password"}}
-    C -->|"Sai"| D["⚠️ Hiện cảnh báo lỗi"]
+    A["Khởi động ứng dụng"] --> B["Đăng nhập người dùng"]
+    B --> C{{"Thông tin đăng nhập<br/>hợp lệ?"}}
+    C -->|"Không"| D["Thông báo lỗi"]
     D --> B
-    C -->|"Đúng"| E["Xác định role<br/>(admin / guest)"]
-    E --> F["📱 Dashboard(role)<br/>Hiển thị Tab 1"]
+    C -->|"Có"| E["Hiển thị giao diện chính"]
 
-    F --> G["⏱️ Timer quét COM<br/>mỗi 2 giây"]
-    F --> H["📂 Load Settings<br/>(port, atten, theme)"]
-    F --> I["📝 Tạo file CSV log"]
+    E --> F["Chọn cổng COM<br/>và tốc độ truyền"]
+    F --> G{{"Kết nối được<br/>với thiết bị?"}}
+    G -->|"Không"| H["Thông báo kiểm tra kết nối"]
+    H --> F
+    G -->|"Có"| I["Vào chế độ điều khiển<br/>và giám sát"]
 
-    G --> J["🖥️ Hiển thị danh sách<br/>cổng COM khả dụng"]
+    I --> J["Nhận dữ liệu đo<br/>từ STM32 qua UART"]
+    J --> K["Tách dữ liệu nhiệt độ<br/>và công suất"]
+    K --> L["Hiển thị lên giao diện<br/>và ghi log"]
+    L --> J
 
-    J --> K{{"Người dùng chọn<br/>hành động?"}}
-    K -->|"🚀 Bắt đầu"| L["start_program()"]
-    K -->|"ℹ️ Giới thiệu"| M["show_info_window()"]
-    K -->|"❌ Thoát"| N["closeEvent()<br/>Lưu settings & đóng"]
+    I --> M["Người dùng điều chỉnh<br/>mức suy hao"]
+    M --> N["Quy đổi mức suy hao<br/>thành giá trị điều khiển"]
+    N --> O["Gửi lệnh suy hao<br/>từ App đến STM32"]
+    O --> P["STM32 điều khiển<br/>IC suy hao PE4302"]
+    P --> Q["Cập nhật trạng thái<br/>và lưu bản ghi điều chỉnh"]
+    Q --> I
 
-    L --> O{{"Cổng COM<br/>hợp lệ?"}}
-    O -->|"Không"| P["⚠️ Cảnh báo<br/>không có COM"]
-    P --> K
-    O -->|"Có"| Q["Tạo SerialReader thread<br/>Baudrate từ Settings"]
-    Q --> R["Dừng timer quét COM"]
-    R --> S["🔄 Chuyển sang Tab 2<br/>Giao diện điều khiển"]
-
-    S --> T["📊 Hiển thị Gauge<br/>Nhiệt độ + Công suất"]
-    S --> U["🎚️ Slider suy hao<br/>(0 - 31.5 dB)"]
+    I --> R{{"Người dùng<br/>kết thúc?"}}
+    R -->|"Chưa"| I
+    R -->|"Có"| S["Lưu cài đặt,<br/>đóng kết nối và thoát"]
 
     style A fill:#1abc9c,color:#fff
-    style B fill:#3498db,color:#fff
-    style F fill:#2ecc71,color:#fff
-    style S fill:#e67e22,color:#fff
-    style N fill:#e74c3c,color:#fff
+    style E fill:#3498db,color:#fff
+    style I fill:#2ecc71,color:#fff
+    style O fill:#e67e22,color:#fff
+    style P fill:#9b59b6,color:#fff
+    style S fill:#e74c3c,color:#fff
 ```
 
 ## 3.3 Lưu Đồ Xử Lý Dữ Liệu Serial (Python side)
