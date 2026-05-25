@@ -1,593 +1,151 @@
-# 📊 PHÂN TÍCH TOÀN HỆ THỐNG K31-TTVT
-## Phần mềm Hiển thị Công suất Phát & Điều chỉnh Suy hao Khối Thu Phát Vệ Tinh
-
-> **Tác giả phân tích**: Antigravity AI  
-> **Ngày**: 25/05/2026  
-> **Phiên bản firmware**: STM32F407VET6 — STM32CubeIDE  
-> **Phiên bản app**: Python 3.x — PyQt5  
+# THUYẾT MINH MÔ TẢ THUẬT TOÁN PHẦN MỀM
+## Phần mềm Hiển thị Công suất Phát và Điều chỉnh Suy hao Khối Thu Phát Vệ Tinh K31-TTVT
 
 ---
 
-# PHẦN I — TỔNG QUAN HỆ THỐNG
+## 1. Tổng quan
 
-## 1.1 Sơ Đồ Khối Hệ Thống
+Phần mềm K31-TTVT được xây dựng trên nền tảng Python sử dụng thư viện đồ họa PyQt5, thực hiện hai chức năng chính: **giám sát các thông số thiết bị** (nhiệt độ, công suất phát) và **điều khiển mức suy hao** của khối thu phát vệ tinh thông qua giao tiếp nối tiếp UART với vi điều khiển STM32F407. Thuật toán hoạt động của phần mềm được chia thành hai nhánh song song: **nhánh giám sát** (nhận và hiển thị dữ liệu từ STM32) và **nhánh điều khiển** (gửi lệnh điều chỉnh suy hao xuống STM32).
 
-```mermaid
-flowchart LR
-    subgraph HW["🔧 PHẦN CỨNG (STM32F407VET6)"]
-        direction TB
-        LM75["🌡️ LM75<br/>Cảm biến nhiệt độ<br/>(I2C1)"]
-        ADC["⚡ ADC3<br/>Đo điện áp → Công suất<br/>(12-bit, 128 mẫu)"]
-        PE["🎚️ PE4302<br/>IC suy hao số<br/>(SPI1, 6-bit)"]
-        UART["📡 FT232<br/>USB-UART<br/>(USART1, 115200)"]
-        LED["💡 LED1-4<br/>Chỉ thị trạng thái"]
-        TIM["⏱️ TIM3<br/>PWM (2 kênh)"]
-    end
-
-    subgraph SW["💻 PHẦN MỀM (Python - PyQt5)"]
-        direction TB
-        LOGIN["🔐 LoginWindow"]
-        TAB1["📱 Tab 1: Trang chủ<br/>Chọn COM port"]
-        TAB2["📊 Tab 2: Điều khiển<br/>Gauge + Slider"]
-        TAB3["⚙️ Tab 3: Cài đặt<br/>Baudrate + Theme"]
-        EXPORT["📄 Xuất báo cáo<br/>Excel + PDF"]
-    end
-
-    LM75 -->|"I2C"| UART
-    ADC -->|"Power calc"| UART
-    UART <-->|"USB-UART<br/>115200 baud"| SW
-    SW -->|"Lệnh suy hao"| UART
-    UART -->|"SPI"| PE
-
-    style HW fill:#1a1a2e,color:#e0e0e0
-    style SW fill:#16213e,color:#e0e0e0
-```
-
-## 1.2 Bảng Tổng Hợp Thành Phần
-
-| Lớp | Thành phần | Công nghệ | File nguồn |
-|-----|-----------|-----------|------------|
-| **MCU** | STM32F407VET6 | Cortex-M4, 168MHz, HAL | [main.c](file:///E:/Tuan Document/NCKH TLPK/Thay Phan BMTL/Code/TTVT_K31 F407ver/Core/Src/main.c) |
-| **Nhiệt độ** | LM75 (I2C) | I2C1 @ 100kHz, địa chỉ 0x48 | [LM75.c](file:///E:/Tuan Document/NCKH TLPK/Thay Phan BMTL/Code/TTVT_K31 F407ver/Core/Src/LM75.c) |
-| **Giao tiếp** | FT232 (USB-UART) | USART1 @ 115200, 8N1, Interrupt | [ft232.c](file:///E:/Tuan Document/NCKH TLPK/Thay Phan BMTL/Code/TTVT_K31 F407ver/Core/Src/ft232.c) |
-| **Suy hao** | PE4302 (SPI) | SPI1 Master, 1-line, 6-bit | [main.c L82-111](file:///E:/Tuan Document/NCKH TLPK/Thay Phan BMTL/Code/TTVT_K31 F407ver/Core/Src/main.c#L82-L111) |
-| **GUI** | Dashboard (PyQt5) | Python 3.x, multi-tab | [app.py](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py) |
-| **Đăng nhập** | LoginWindow | Hard-code user/pass | [app.py L818-859](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py#L818-L859) |
+Lưu đồ thuật toán mô tả toàn bộ quy trình hoạt động của phần mềm từ khi khởi động đến khi kết thúc phiên làm việc, bao gồm các bước xác thực người dùng, thiết lập kết nối, giám sát dữ liệu thời gian thực và điều khiển thiết bị từ xa.
 
 ---
 
-# PHẦN II — FIRMWARE STM32F407
+## 2. Thuyết minh chi tiết thuật toán
 
-## 2.1 Cấu Hình Clock Hệ Thống
+### 2.1. Khởi động ứng dụng và xác thực người dùng
 
-```
-Nguồn: HSI (16 MHz nội)
-PLL: PLLM=8, PLLN=168, PLLP=2, PLLQ=4
-  → SYSCLK = (16/8) × 168 / 2 = 168 MHz
-  → AHB  = 168 MHz  (DIV1)
-  → APB1 = 42 MHz   (DIV4) — cho I2C1, TIM3, SPI2, SPI3
-  → APB2 = 84 MHz   (DIV2) — cho USART1, SPI1, ADC3
-```
+Khi ứng dụng được khởi động, hệ thống hiển thị cửa sổ **đăng nhập người dùng** yêu cầu nhập thông tin tài khoản (tên đăng nhập và mật khẩu). Đây là bước bảo mật nhằm phân quyền sử dụng phần mềm. Hệ thống hỗ trợ hai cấp quyền: tài khoản **quản trị** (admin) có toàn quyền điều khiển, và tài khoản **khách** (guest) chỉ có quyền quan sát.
 
-## 2.2 Bản Đồ Ngoại Vi (Peripheral Map)
+Sau khi người dùng nhập thông tin, thuật toán thực hiện kiểm tra: **thông tin đăng nhập có hợp lệ hay không?**
 
-| Ngoại vi | Chức năng | Chân GPIO | Cấu hình |
-|----------|----------|-----------|----------|
-| **I2C1** | Đọc LM75 | PB6 (SCL), PB7 (SDA) | 100kHz, 7-bit addr |
-| **USART1** | Giao tiếp FT232 | PA9 (TX), PA10 (RX) | 115200, 8N1, IT |
-| **SPI1** | Điều khiển PE4302 | PA5 (SCK), PA7 (MOSI) | Master, 1-line, 8-bit, CPOL=0/CPHA=0, Prescaler=32 |
-| **SPI2** | (Dự phòng) | PB13 (SCK), PB14 (MISO), PB15 (MOSI) | Master, 2-lines |
-| **SPI3** | (Dự phòng) | PB3 (SCK), PB4 (MISO), PB5 (MOSI) | Master, 2-lines |
-| **ADC3** | Đo điện áp công suất | PA2 (Channel 2) | 12-bit, 56 cycles, SW trigger |
-| **TIM3** | PWM | PA6 (CH1), PA7 (CH2) | Prescaler=0, Period=65535, PWM1 |
-| **GPIO** | LE (Latch) PE4302 | PC4 | Output PP |
-| **GPIO** | CHIP_SELECT | PC1 | Output PP |
-| **GPIO** | LED1 | PA8 | Output PP |
-| **GPIO** | LED2-4 | PC9, PC8, PC7 | Output PP |
-| **GPIO** | RESET | PC11 | Output PP |
-| **GPIO** | Latch_E | PD0 | Output PP |
-| **DMA2** | ADC3 (cấu hình sẵn) | — | Stream0, Priority=0 |
+- Nếu **không hợp lệ**: hệ thống hiển thị **thông báo lỗi** cho người dùng biết thông tin đăng nhập sai, sau đó quay trở lại bước đăng nhập để người dùng nhập lại.
 
-## 2.3 Lưu Đồ Thuật Toán Firmware (main loop)
+- Nếu **hợp lệ**: hệ thống xác nhận quyền truy cập và chuyển sang bước tiếp theo — hiển thị giao diện chính của phần mềm.
 
-```mermaid
-flowchart TD
-    A["🔧 HAL_Init()<br/>Reset peripherals"] --> B["⏱️ SystemClock_Config()<br/>HSI → PLL → 168MHz"]
-    B --> C["📌 Init Peripherals<br/>GPIO, DMA, I2C1, SPI1/2/3<br/>USART1, ADC3, TIM3"]
-    C --> D["🚀 start_task()<br/>Bật UART Receive IT"]
+### 2.2. Hiển thị giao diện và thiết lập cấu hình kết nối
 
-    D --> E{"🔄 WHILE (1)<br/>Super Loop"}
+Sau khi xác thực thành công, phần mềm **hiển thị giao diện** chính (Trang chủ). Tại đây, người dùng thực hiện bước cấu hình kết nối bằng cách **chọn cổng COM và tốc độ truyền** (baudrate) phù hợp với thiết bị phần cứng. Hệ thống tự động quét và liệt kê các cổng COM đang có sẵn trên máy tính, cập nhật định kỳ mỗi 2 giây để phát hiện khi thiết bị được cắm vào hoặc rút ra.
 
-    E --> F{{"uart_data_ready<br/>== 1 ?"}}
-    F -->|"Có"| G["uart_data_ready = 0<br/>PE4302_AdjustFromUart(parsed_value)"]
-    G --> H["Giới hạn raw ≤ 315<br/>steps = raw / 5<br/>PE4302_SetSteps(steps)"]
-    H --> I["SPI1 Transmit 6-bit<br/>HMC542_LatchPulse()"]
-    I --> E
+### 2.3. Thiết lập kết nối với thiết bị
 
-    F -->|"Không"| J{{"HAL_GetTick() - last_adc<br/>≥ 200ms ?"}}
+Khi người dùng nhấn nút "Bắt đầu chương trình", thuật toán tiến hành kiểm tra: **kết nối cuộc với thiết bị có thành công hay không?**
 
-    J -->|"Có"| K["Lấy 128 mẫu ADC3<br/>(polling mode)"]
-    K --> L["adc_avg = sum / 128<br/>v_adc = avg × 3.3 / 4095"]
-    L --> M["power_w = 11.35 × v_adc - 13.30<br/>if power < 0.15 → 0"]
-    M --> N["power_trans = power_w × 10<br/>(giá trị nguyên ×10)"]
-    N --> E
+- Nếu **không thành công** (cổng COM không tồn tại, đang bị chiếm, hoặc thiết bị chưa được kết nối): hệ thống hiển thị **thông báo kiểm tra kết nối**, yêu cầu người dùng kiểm tra lại cáp kết nối, chọn đúng cổng COM, sau đó quay lại bước chọn cổng COM.
 
-    J -->|"Không"| O{{"HAL_GetTick() - last_temp<br/>≥ 500ms ?"}}
+- Nếu **thành công**: phần mềm khởi tạo luồng đọc dữ liệu nối tiếp (Serial Reader Thread), dừng bộ đếm quét cổng COM, và chuyển giao diện sang **chế độ điều khiển và giám sát**. Tại chế độ này, hai nhánh xử lý song song được kích hoạt.
 
-    O -->|"Có"| P["temperature = LM75_ReadTemp()<br/>(I2C1 đọc 2 byte)"]
-    P --> Q["temperature_trans = temp × 10"]
-    Q --> R["sprintf: power_trans,temperature_trans"]
-    R --> S["📡 HAL_UART_Transmit<br/>Gửi lên PC"]
-    S --> E
+### 2.4. Nhánh giám sát — Nhận và hiển thị dữ liệu (nhánh trái)
 
-    O -->|"Không"| E
+Đây là nhánh xử lý chính chạy liên tục trong suốt phiên làm việc, thực hiện vòng lặp sau:
 
-    style A fill:#2ecc71,color:#fff
-    style D fill:#3498db,color:#fff
-    style E fill:#e67e22,color:#fff
-    style I fill:#e74c3c,color:#fff
-    style S fill:#9b59b6,color:#fff
-```
+**Bước 1 — Nhận dữ liệu từ STM32 qua UART**: Luồng Serial Reader liên tục lắng nghe dữ liệu từ vi điều khiển STM32 gửi lên qua giao tiếp UART. Vi điều khiển STM32 định kỳ mỗi 500ms gửi một gói dữ liệu chứa giá trị công suất phát và nhiệt độ thiết bị, theo định dạng chuỗi ký tự phân cách bởi dấu phẩy (ví dụ: "140,330" tương ứng 14.0W và 33.0°C).
 
-## 2.4 Module LM75 — Cảm Biến Nhiệt Độ
+**Bước 2 — Tách dữ liệu nhiệt độ và công suất**: Sau khi nhận được chuỗi dữ liệu, phần mềm thực hiện phân tích cú pháp (parsing) để tách riêng hai thành phần: giá trị công suất phát (đơn vị Watt) và giá trị nhiệt độ (đơn vị °C). Các giá trị thô được chia cho 10 để chuyển về đơn vị thực tế. Đồng thời, thuật toán kiểm tra tính hợp lệ của dữ liệu: nếu nhiệt độ vượt quá 100°C hoặc công suất vượt ngưỡng cho phép, giá trị sẽ được đặt về 0 và ghi nhận cảnh báo, tránh hiển thị sai lệch trên giao diện.
 
-**File**: [LM75.c](file:///E:/Tuan Document/NCKH TLPK/Thay Phan BMTL/Code/TTVT_K31 F407ver/Core/Src/LM75.c)
+**Bước 3 — Hiển thị dữ liệu và ghi log**: Các giá trị sau khi xử lý được cập nhật lên giao diện đồ họa thông qua các widget dạng đồng hồ đo (Gauge Widget), hiển thị trực quan nhiệt độ và công suất phát hiện tại. Song song đó, dữ liệu được ghi lại vào file nhật ký CSV (bao gồm mốc thời gian, nhiệt độ, công suất và giá trị suy hao hiện tại) phục vụ cho việc truy xuất và xuất báo cáo sau này.
 
-```
-Giao tiếp: I2C1
-Địa chỉ: 0x48 (7-bit) → 0x90 (8-bit, write)
-Thanh ghi: 0x00 (Temperature Register)
-Dữ liệu: 2 byte, 9-bit resolution
-  → temp = (buffer[0] << 8 | buffer[1]) >> 7
-  → Kết quả = temp × 0.5°C
-  → Độ phân giải: 0.5°C
-  → Nếu lỗi I2C → trả về -1000.0f
-```
+Sau khi hoàn thành một chu kỳ xử lý, thuật toán kiểm tra: **người dùng có kết thúc phiên làm việc không?**
 
-```mermaid
-flowchart LR
-    A["LM75_ReadTemp()"] --> B["I2C1 Mem Read<br/>Addr=0x90, Reg=0x00<br/>2 bytes"]
-    B --> C{{"HAL_OK?"}}
-    C -->|"Không"| D["return -1000.0f"]
-    C -->|"Có"| E["temp = (buf[0]<<8 | buf[1]) >> 7"]
-    E --> F["return temp × 0.5"]
+- Nếu **không**: vòng lặp quay lại Bước 1, tiếp tục nhận và xử lý dữ liệu mới từ STM32.
 
-    style A fill:#f39c12,color:#fff
-    style F fill:#2ecc71,color:#fff
-    style D fill:#e74c3c,color:#fff
-```
+- Nếu **có** (người dùng nhấn nút kết thúc hoặc đóng ứng dụng): phần mềm thực hiện **lưu cài đặt** (cổng COM đã chọn, giá trị suy hao cuối cùng, giao diện sáng/tối), **đóng kết nối** serial, đóng file nhật ký và **thoát** chương trình.
 
-## 2.5 Module FT232 — Giao Tiếp UART
+### 2.5. Nhánh điều khiển — Điều chỉnh suy hao (nhánh phải)
 
-**File**: [ft232.c](file:///E:/Tuan Document/NCKH TLPK/Thay Phan BMTL/Code/TTVT_K31 F407ver/Core/Src/ft232.c)
+Song song với nhánh giám sát, nhánh điều khiển cho phép người dùng tương tác chủ động với thiết bị để thay đổi mức suy hao tín hiệu. Quy trình gồm các bước sau:
 
-### Cơ chế nhận lệnh (Interrupt-driven)
+**Bước 1 — Người dùng điều chỉnh mức suy hao**: Trên giao diện điều khiển, người dùng sử dụng thanh trượt (slider) để chọn mức suy hao mong muốn. Thanh trượt có 64 bước (từ 0 đến 63), mỗi bước tương ứng 0.5 dB, cho phép điều chỉnh suy hao trong dải từ 0.0 dB đến 31.5 dB. Giá trị suy hao hiện tại được hiển thị trực quan trên giao diện theo thời gian thực khi người dùng kéo thanh trượt.
 
-```mermaid
-flowchart TD
-    A["📡 UART Byte đến<br/>(Interrupt)"] --> B["HAL_UART_RxCpltCallback()"]
-    B --> C{{"byte == 'd' ?"}}
-    C -->|"Không"| D{{"index < 4 ?"}}
-    D -->|"Có"| E["uart_buffer[index++] = byte"]
-    D -->|"Không"| F["Bỏ qua (buffer đầy)"]
-    E --> G["Re-enable UART_Receive_IT"]
-    F --> G
+**Bước 2 — Quy đổi mức suy hao thành giá trị điều khiển**: Khi người dùng xác nhận giá trị suy hao (nhấn nút OK hoặc phím Enter), phần mềm quy đổi giá trị dB thành giá trị điều khiển số nguyên theo công thức: *giá trị gửi = mức suy hao (dB) × 10*. Ví dụ: mức suy hao 10.5 dB được quy đổi thành giá trị 105.
 
-    C -->|"Có (delimiter)"| H["uart_buffer[index] = NULL"]
-    H --> I["parsed_value = atoi(buffer)"]
-    I --> J["Reset index = 0<br/>memset buffer"]
-    J --> K["uart_data_ready = 1"]
-    K --> G
+**Bước 3 — Gửi lệnh suy hao từ App đến STM32**: Giá trị điều khiển được đóng gói thành chuỗi ký tự kèm theo ký tự phân cách 'd' (ví dụ: "105d") và gửi xuống vi điều khiển STM32 thông qua kết nối UART đang hoạt động.
 
-    G --> L["Chờ byte tiếp theo..."]
+**Bước 4 — STM32 điều khiển IC suy hao PE4302**: Phía vi điều khiển STM32, khi nhận được lệnh qua UART, bộ xử lý ngắt UART sẽ tích lũy các byte nhận được vào bộ đệm cho đến khi gặp ký tự phân cách 'd'. Sau đó, chuỗi số trong bộ đệm được chuyển đổi thành giá trị nguyên, quy đổi thành số bước suy hao (mỗi bước = 0.5 dB, tức chia cho 5), và gửi qua giao tiếp SPI đến IC suy hao số PE4302. IC PE4302 là bộ suy hao 6-bit, nhận dữ liệu SPI và tự động thiết lập mức suy hao RF tương ứng. Tín hiệu Latch Enable (LE) được kích xung dương để chốt giá trị suy hao mới vào IC.
 
-    style A fill:#3498db,color:#fff
-    style C fill:#e67e22,color:#fff
-    style K fill:#2ecc71,color:#fff
-```
-
-### Bảng biến toàn cục UART
-
-| Biến | Kiểu | Kích thước | Mô tả |
-|------|------|-----------|-------|
-| `uart_rx_byte` | char | 1 byte | Buffer nhận 1 byte interrupt |
-| `uart_buffer[]` | char[5] | 5 bytes | Buffer tích lũy chuỗi số |
-| `uart_index` | uint8_t | 1 byte | Chỉ số ghi hiện tại |
-| `parsed_value` | uint16_t | 2 bytes | Giá trị số sau khi parse |
-| `uart_data_ready` | volatile uint8_t | 1 byte | Cờ báo có lệnh mới |
-
-## 2.6 Module PE4302 — IC Suy Hao Số
-
-**File**: [main.c L82-111](file:///E:/Tuan Document/NCKH TLPK/Thay Phan BMTL/Code/TTVT_K31 F407ver/Core/Src/main.c#L82-L111)
-
-```
-IC: PE4302 (hoặc tương đương HMC542)
-Giao tiếp: SPI1 (Master, 1-line, MSB first)
-Dải suy hao: 0 → 31.5 dB
-Bước nhảy: 0.5 dB
-Độ phân giải: 6-bit (0 → 63 steps)
-Latch Enable: PC4 (xung dương để chốt dữ liệu)
-```
-
-### Quy trình điều khiển suy hao
-
-```mermaid
-flowchart LR
-    A["raw_value<br/>(0-315)"] --> B["Giới hạn ≤ 315"]
-    B --> C["steps = raw / 5<br/>(0-63)"]
-    C --> D["data = steps AND 0x3F<br/>(6-bit mask)"]
-    D --> E["LE = LOW"]
-    E --> F["SPI1 Transmit<br/>(1 byte)"]
-    F --> G["Wait BSY = 0"]
-    G --> H["LE = HIGH (1ms)"]
-    H --> I["LE = LOW<br/>✅ Chốt dữ liệu"]
-
-    style A fill:#f39c12,color:#fff
-    style F fill:#3498db,color:#fff
-    style I fill:#2ecc71,color:#fff
-```
-
-## 2.7 Module ADC — Đo Công Suất
-
-**File**: [main.c L172-201](file:///E:/Tuan Document/NCKH TLPK/Thay Phan BMTL/Code/TTVT_K31 F407ver/Core/Src/main.c#L172-L201)
-
-```
-Ngoại vi: ADC3, Channel 2 (PA2)
-Độ phân giải: 12-bit (0 → 4095)
-Sampling time: 56 cycles
-Lọc: Trung bình 128 mẫu (software averaging)
-Chu kỳ: Mỗi 200ms
-
-Công thức chuyển đổi:
-  v_adc = (adc_avg × 3.3) / 4095    (Volt)
-  power_w = 11.35 × v_adc - 13.30   (Watt)
-  Nếu power_w < 0.15 → 0.0
-  power_trans = (uint16_t)(power_w × 10)
-```
-
-> **Lưu ý**: Hiện tại trong code có dòng `power_trans=140;` (line 211), đây là **giá trị giả lập cố định** (14.0W) dùng để test. Khi triển khai thực tế cần **xóa dòng này**.
+**Bước 5 — Cập nhật trạng thái và lưu bản ghi điều chỉnh**: Sau khi gửi lệnh thành công, phần mềm cập nhật trạng thái trên giao diện và ghi lại bản ghi điều chỉnh vào nhật ký phiên (session log), bao gồm: mốc thời gian, giá trị nhiệt độ và công suất tại thời điểm điều chỉnh, cùng mức suy hao đã thiết lập. Bản ghi này phục vụ cho việc xuất báo cáo dưới dạng file Excel hoặc PDF.
 
 ---
 
-# PHẦN III — PHẦN MỀM PYTHON (app.py)
+## 3. Tóm tắt luồng hoạt động
 
-## 3.1 Kiến Trúc Phần Mềm
+Toàn bộ thuật toán của phần mềm K31-TTVT có thể được tóm tắt qua các giai đoạn chính sau:
 
-**File**: [app.py](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py) — 874 dòng
-
-| # | Class | Dòng | Vai trò |
-|---|-------|------|---------|
-| 1 | [resource_path()](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py#L31-L35) | 31-35 | Hỗ trợ đóng gói exe (PyInstaller `_MEIPASS`) |
-| 2 | [SerialReader](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py#L38-L92) | 38-92 | QThread đọc/ghi UART serial |
-| 3 | [GaugeWidget](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py#L93-L133) | 93-133 | Widget hiển thị gauge (thanh + số) |
-| 4 | [Dashboard](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py#L135-L815) | 135-815 | Giao diện chính (3 tab ẩn/hiện) |
-| 5 | [LoginWindow](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py#L818-L859) | 818-859 | Dialog đăng nhập (admin/guest) |
-
-## 3.2 Lưu Đồ Thuật Toán Tổng Quát App
-
-```mermaid
-flowchart TD
-    A["Khởi động ứng dụng"] --> B["Đăng nhập người dùng"]
-    B --> C{{"Thông tin đăng nhập<br/>hợp lệ?"}}
-    C -->|"Không"| D["Thông báo lỗi"]
-    D --> B
-    C -->|"Có"| E["Hiển thị giao diện chính"]
-
-    E --> F["Chọn cổng COM<br/>và tốc độ truyền"]
-    F --> G{{"Kết nối được<br/>với thiết bị?"}}
-    G -->|"Không"| H["Thông báo kiểm tra kết nối"]
-    H --> F
-    G -->|"Có"| I["Vào chế độ điều khiển<br/>và giám sát"]
-
-    I --> J["Nhận dữ liệu đo<br/>từ STM32 qua UART"]
-    J --> K["Tách dữ liệu nhiệt độ<br/>và công suất"]
-    K --> L["Hiển thị lên giao diện<br/>và ghi log"]
-    L --> J
-
-    I --> M["Người dùng điều chỉnh<br/>mức suy hao"]
-    M --> N["Quy đổi mức suy hao<br/>thành giá trị điều khiển"]
-    N --> O["Gửi lệnh suy hao<br/>từ App đến STM32"]
-    O --> P["STM32 điều khiển<br/>IC suy hao PE4302"]
-    P --> Q["Cập nhật trạng thái<br/>và lưu bản ghi điều chỉnh"]
-    Q --> I
-
-    I --> R{{"Người dùng<br/>kết thúc?"}}
-    R -->|"Chưa"| I
-    R -->|"Có"| S["Lưu cài đặt,<br/>đóng kết nối và thoát"]
-
-    style A fill:#1abc9c,color:#fff
-    style E fill:#3498db,color:#fff
-    style I fill:#2ecc71,color:#fff
-    style O fill:#e67e22,color:#fff
-    style P fill:#9b59b6,color:#fff
-    style S fill:#e74c3c,color:#fff
-```
-
-## 3.3 Lưu Đồ Xử Lý Dữ Liệu Serial (Python side)
-
-```mermaid
-flowchart TD
-    A["SerialReader.run()<br/>QThread chạy liên tục"] --> B{{"ser.in_waiting > 0<br/>AND data_ready == False?"}}
-    B -->|"Không"| A
-    B -->|"Có"| C["Đọc 1 dòng UART<br/>readline().decode('utf-8')"]
-    C --> D["data_ready = True<br/>emit signal data_received(line)"]
-    D --> E["handle_data(raw)"]
-
-    E --> F{{"raw rỗng?"}}
-    F -->|"Có"| G["reset_flag() → quay lại"]
-    F -->|"Không"| H["parts = raw.split(',')"]
-
-    H --> I{{"len(parts)==2<br/>cả 2 != '' ?"}}
-    I -->|"Không"| J["⚠️ Log lỗi định dạng<br/>reset_flag()"]
-    I -->|"Có"| K["temperature_raw = float(parts[0])<br/>voltage_raw = float(parts[1])"]
-
-    K --> L["temperature = raw / 10<br/>voltage = raw / 10"]
-
-    L --> M{{"temperature_raw > 1000?"}}
-    M -->|"Có"| N["temperature = 0<br/>⚠️ Bất thường"]
-    M -->|"Không"| O{{"voltage_raw > 3000?"}}
-    N --> O
-    O -->|"Có"| P["voltage = 0<br/>⚠️ Bất thường"]
-    O -->|"Không"| Q["✅ Cập nhật GaugeWidget"]
-    P --> Q
-
-    Q --> R["📝 Ghi log CSV"]
-    R --> S["reset_flag()"]
-    S --> A
-
-    style A fill:#3498db,color:#fff
-    style E fill:#2ecc71,color:#fff
-    style Q fill:#e67e22,color:#fff
-    style R fill:#9b59b6,color:#fff
-```
-
-## 3.4 Lưu Đồ Điều Chỉnh Suy Hao (Python → STM32)
-
-```mermaid
-flowchart TD
-    A["👤 Kéo Slider<br/>(0 → 63 bước)"] --> B["update_atten_label()<br/>atten_db = slider × 0.5"]
-    B --> C["Hiển thị: 'Suy hao: X.X dB'"]
-
-    D["👤 Nhấn ✅ OK<br/>hoặc phím Enter"] --> E["confirm_atten_value()"]
-
-    E --> F["timestamp = datetime.now()"]
-    F --> G["Đọc giá trị Gauge hiện tại<br/>(nhiệt độ, công suất)"]
-    G --> H["session_log.append()<br/>(lưu cho xuất PDF)"]
-
-    H --> I{{"serial_thread<br/>tồn tại?"}}
-    I -->|"Có"| J["value = int(atten_db × 10)<br/>serial.send('{value}d')"]
-    I -->|"Không"| K["Bỏ qua"]
-
-    J --> L["📝 Ghi CSV<br/>(kèm nhãn 'sent')"]
-    K --> L
-
-    style A fill:#f39c12,color:#fff
-    style D fill:#2ecc71,color:#fff
-    style J fill:#e74c3c,color:#fff
-```
-
-## 3.5 Chuyển Đổi Màn Hình (Tab Navigation)
-
-```mermaid
-stateDiagram-v2
-    [*] --> Tab1_Home : Khởi động
-
-    Tab1_Home --> Tab2_Control : start_program()<br/>Kết nối serial thành công
-    Tab2_Control --> Tab1_Home : back_to_main()<br/>Ngắt serial, bật lại quét COM
-
-    Tab2_Control --> Tab3_Settings : show_settings()
-    Tab3_Settings --> Tab2_Control : back_to_control()
-
-    Tab1_Home --> [*] : close() / Thoát
-
-    state Tab1_Home {
-        [*] --> Quét_COM_tự_động
-        Quét_COM_tự_động --> Chọn_COM
-        Chọn_COM --> Nhấn_Bắt_đầu
-    }
-
-    state Tab2_Control {
-        [*] --> Hiển_thị_Gauge
-        Hiển_thị_Gauge --> Điều_chỉnh_Suy_hao
-        Điều_chỉnh_Suy_hao --> Nhấn_OK_gửi_lệnh
-        Nhấn_OK_gửi_lệnh --> Xuất_Excel_hoặc_PDF
-    }
-
-    state Tab3_Settings {
-        [*] --> Chọn_Baudrate
-        Chọn_Baudrate --> Chọn_Theme
-        Chọn_Theme --> Lưu_Settings
-    }
-```
-
-## 3.6 Chức Năng Xuất Báo Cáo
-
-### Excel — [export_report()](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py#L637-L685)
-- Đọc file CSV log → Ghi vào Workbook (openpyxl)
-- Tự động vẽ biểu đồ LineChart (Nhiệt độ & Công suất theo thời gian)
-- Tên file: `report_YYYY-MM-DD_HH-MM.xlsx`
-
-### PDF — [export_pdf()](file:///E:/Tuan Document/NCKH TLPK/pythonProject/app.py#L744-L803)
-- Sử dụng thư viện `reportlab`
-- Gồm: Logo MTA → Tiêu đề → Bảng dữ liệu `session_log`
-- Font Unicode tùy chỉnh (Timenew.ttf)
+| Giai đoạn | Mô tả | Kết quả |
+|-----------|-------|---------|
+| **Khởi động** | Ứng dụng khởi chạy, hiển thị cửa sổ đăng nhập | Xác thực người dùng |
+| **Xác thực** | Kiểm tra tên đăng nhập và mật khẩu | Phân quyền admin/guest |
+| **Cấu hình** | Chọn cổng COM và tốc độ truyền | Thiết lập tham số kết nối |
+| **Kết nối** | Mở cổng serial, khởi tạo luồng đọc dữ liệu | Sẵn sàng truyền/nhận dữ liệu |
+| **Giám sát** | Vòng lặp nhận dữ liệu → phân tích → hiển thị → ghi log | Hiển thị thời gian thực trên Gauge |
+| **Điều khiển** | Chọn suy hao → quy đổi → gửi UART → SPI → PE4302 | Thiết lập suy hao RF trên phần cứng |
+| **Kết thúc** | Lưu cài đặt, đóng kết nối, đóng file log | Thoát ứng dụng an toàn |
 
 ---
 
-# PHẦN IV — GIAO THỨC TRUYỀN THÔNG
+## 4. Đặc điểm kỹ thuật nổi bật
 
-## 4.1 Bảng Giao Thức Chi Tiết
+**a) Xử lý đa luồng (Multi-threading):** Phần mềm sử dụng luồng riêng (QThread) cho việc đọc dữ liệu serial, tách biệt khỏi luồng giao diện chính. Điều này đảm bảo giao diện người dùng không bị "đơ" (freeze) trong quá trình chờ dữ liệu từ thiết bị, duy trì trải nghiệm tương tác mượt mà.
 
-### Chiều STM32 → PC (Dữ liệu sensor)
+**b) Cơ chế cờ hiệu (Flag mechanism):** Thuật toán sử dụng biến cờ `data_ready` để đồng bộ giữa luồng đọc serial và luồng xử lý dữ liệu. Khi một gói dữ liệu được nhận, cờ được đặt lên (set), ngăn việc đọc chồng chéo. Sau khi dữ liệu được xử lý xong, cờ được hạ xuống (reset) để sẵn sàng nhận gói dữ liệu tiếp theo.
 
-| Trường | Nội dung | Ví dụ |
-|--------|---------|-------|
-| **Format** | `"{power_trans},{temperature_trans}\r\n"` | `"140,330\r\n"` |
-| **power_trans** | Công suất × 10 (uint16) | 140 → 14.0W |
-| **temperature_trans** | Nhiệt độ × 10 (uint16) | 330 → 33.0°C |
-| **Chu kỳ** | Mỗi 500ms | — |
-| **Delimiter** | `\r\n` | — |
+**c) Kiểm tra tính hợp lệ dữ liệu:** Trước khi hiển thị, dữ liệu nhận từ STM32 được kiểm tra ngưỡng (nhiệt độ ≤ 100°C, công suất ≤ 300W). Các giá trị vượt ngưỡng được xử lý bằng cách đặt về 0 và ghi nhận cảnh báo, tránh hiển thị sai lệch trên giao diện.
 
-### Chiều PC → STM32 (Lệnh suy hao)
+**d) Lưu trữ và xuất báo cáo:** Toàn bộ dữ liệu giám sát được lưu liên tục vào file CSV. Người dùng có thể xuất báo cáo dưới dạng file Excel (kèm biểu đồ nhiệt độ và công suất theo thời gian) hoặc file PDF (kèm bảng dữ liệu và logo đơn vị) phục vụ công tác quản lý và báo cáo.
 
-| Trường | Nội dung | Ví dụ |
-|--------|---------|-------|
-| **Format** | `"{value}d"` | `"105d"` |
-| **value** | atten_dB × 10 (int) | 105 → 10.5 dB |
-| **Delimiter** | Ký tự `'d'` | — |
-| **Dải giá trị** | 0 → 315 | 0.0 → 31.5 dB |
+**e) Ghi nhớ cài đặt:** Phần mềm lưu lại các tham số cài đặt của phiên làm việc trước (cổng COM, mức suy hao, giao diện sáng/tối) và tự động khôi phục khi khởi động lại, giúp giảm thao tác cấu hình lặp lại cho người dùng.
 
-## 4.2 Lưu Đồ Đồng Bộ Giao Thức Hoàn Chỉnh
+---
 
-```mermaid
-sequenceDiagram
-    participant User as 👤 Người dùng
-    participant App as 💻 app.py (PyQt5)
-    participant FT232 as 📡 FT232 (USB-UART)
-    participant STM32 as 🔧 STM32F407
-    participant LM75 as 🌡️ LM75
-    participant ADC as ⚡ ADC3
-    participant PE as 🎚️ PE4302
+## 5. Sơ đồ tương tác hệ thống
 
-    Note over STM32: Super loop bắt đầu
-
-    rect rgb(40, 60, 80)
-        Note over STM32,ADC: Mỗi 200ms - Đọc ADC
-        STM32->>ADC: HAL_ADC_Start (128 lần)
-        ADC-->>STM32: adc_avg
-        STM32->>STM32: power_w = 11.35×v - 13.30
-    end
-
-    rect rgb(40, 80, 60)
-        Note over STM32,LM75: Mỗi 500ms - Đọc nhiệt độ & Gửi PC
-        STM32->>LM75: I2C1 Read (2 bytes)
-        LM75-->>STM32: temperature (0.5°C res)
-        STM32->>FT232: sprintf("140,330\r\n")
-        FT232->>App: USB → "140,330"
-        App->>App: Parse: Temp=33.0°C, Power=14.0W
-        App->>App: Cập nhật GaugeWidget
-        App->>App: Ghi log CSV
-    end
-
-    rect rgb(80, 40, 40)
-        Note over User,PE: Người dùng điều chỉnh suy hao
-        User->>App: Kéo slider = 21 (10.5 dB)
-        User->>App: Nhấn OK
-        App->>App: value = 10.5 × 10 = 105
-        App->>FT232: serial.send("105d")
-        FT232->>STM32: UART IT nhận từng byte
-        Note over STM32: '1','0','5' → buffer<br/>'d' → delimiter
-        STM32->>STM32: parsed_value = atoi("105") = 105
-        STM32->>STM32: uart_data_ready = 1
-        STM32->>STM32: steps = 105/5 = 21
-        STM32->>PE: SPI1 Transmit (0x15)
-        STM32->>PE: Latch Pulse ↑↓
-        PE-->>PE: Suy hao = 10.5 dB ✅
-    end
-```
-
-## 4.3 Bảng Chuyển Đổi Giá Trị Suy Hao
+Mối quan hệ giữa các thành phần trong hệ thống được tóm tắt như sau:
 
 ```
-PC (app.py)                    UART              STM32 (main.c)              PE4302
-─────────────                  ────              ──────────────              ──────
-slider_val = 21                                                              
-atten_db = 21 × 0.5 = 10.5                                                 
-value = int(10.5 × 10) = 105  →  "105d"  →  parsed_value = 105             
-                                              raw_value = 105 (≤315 ✓)      
-                                              steps = 105 / 5 = 21          
-                                              data = 21 & 0x3F = 0x15  →    10.5 dB ✅
+┌─────────────────────────────────────────────────────────────────────┐
+│                        PHẦN MỀM (PC)                               │
+│                                                                     │
+│   ┌──────────┐    ┌────────────────┐    ┌────────────────────────┐  │
+│   │  Đăng    │───▶│  Giao diện     │───▶│  Chế độ Điều khiển    │  │
+│   │  nhập    │    │  chính (Home)  │    │  & Giám sát           │  │
+│   └──────────┘    └────────────────┘    │                        │  │
+│                                         │  ┌──────┐  ┌────────┐ │  │
+│                                         │  │Gauge │  │Slider  │ │  │
+│                                         │  │Widget│  │Suy hao │ │  │
+│                                         │  └──┬───┘  └───┬────┘ │  │
+│                                         └─────┼──────────┼──────┘  │
+│                                               │          │         │
+│                              ┌────────────────┘          │         │
+│                              │ Hiển thị                  │ Gửi    │
+│                              ▼                           ▼         │
+│                    ┌──────────────────────────────────────────┐     │
+│                    │      Serial Reader Thread (UART)         │     │
+│                    └───────────────────┬──────────────────────┘     │
+└────────────────────────────────────────┼────────────────────────────┘
+                                         │
+                              USB-UART (FT232, 115200 baud)
+                                         │
+┌────────────────────────────────────────┼────────────────────────────┐
+│                        PHẦN CỨNG (STM32F407)                       │
+│                                         │                           │
+│                    ┌───────────────────┴──────────────────────┐     │
+│                    │         USART1 (Interrupt-driven)         │     │
+│                    └──┬────────────────────────────────────┬──┘     │
+│                       │                                    │        │
+│            Gửi dữ liệu lên                     Nhận lệnh suy hao  │
+│            (mỗi 500ms)                          (ký tự kết thúc'd')│
+│                       │                                    │        │
+│              ┌────────┴────────┐              ┌────────────┴──────┐ │
+│              │                 │              │                   │ │
+│       ┌──────┴──────┐   ┌─────┴─────┐   ┌────┴────────────────┐  │ │
+│       │  LM75 (I2C) │   │ ADC3      │   │ PE4302 (SPI1)      │  │ │
+│       │  Nhiệt độ   │   │ Công suất │   │ Suy hao 0-31.5 dB  │  │ │
+│       └─────────────┘   └───────────┘   └─────────────────────┘  │ │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-# PHẦN V — PHÂN TÍCH ĐỒNG BỘ FIRMWARE ↔ APP
+## 6. Kết luận
 
-## 5.1 Ma Trận Khớp Nối (Coupling Matrix)
-
-| Tham số | Firmware (STM32) | App (Python) | Trạng thái |
-|---------|-----------------|--------------|-----------|
-| Baudrate | 115200 (hard-code ft232.c:54) | 115200 (default, có thể đổi Settings) | ⚠️ Không đồng bộ nếu user đổi |
-| Format gửi sensor | `"%d,%d\r\n"` (power, temp) | `raw.split(',')` → parts[0]=temp, parts[1]=volt | ⚠️ **THỨ TỰ NGƯỢC** |
-| Delimiter suy hao | `'d'` (ft232.c:27) | `f"{value}d"` (app.py:567,590) | ✅ Khớp |
-| Dải suy hao | 0-315 → 0-63 steps | 0-63 slider → 0-315 value | ✅ Khớp |
-| Hệ số nhân | ×10 (main.c:200,209) | ÷10 (app.py:517,518) | ✅ Khớp |
-
-> [!CAUTION]
-> ### ⚠️ BUG QUAN TRỌNG — Thứ tự dữ liệu không khớp!
-> **Firmware** gửi: `power_trans, temperature_trans` (công suất trước, nhiệt độ sau)  
-> **App** nhận: `parts[0]` → gán cho `temperature_raw`, `parts[1]` → gán cho `voltage_raw`  
-> → **Nhiệt độ và công suất bị ĐẢO NGƯỢC** trên giao diện!
->
-> **Sửa**: Đổi thứ tự trong `handle_data()` hoặc đổi `sprintf` trong firmware.
-
-> [!WARNING]
-> ### ⚠️ Baudrate không đồng bộ
-> Firmware hard-code 115200 baud. App cho phép user đổi baudrate qua Settings (9600, 19200...).  
-> Nếu user chọn baudrate khác 115200 → **mất kết nối**.
->
-> **Sửa**: Hoặc lock baudrate ở app = 115200, hoặc thêm cơ chế handshake.
-
-## 5.2 Phân tích điểm yếu giao thức
-
-| # | Vấn đề | Phía | Mức độ | Giải pháp đề xuất |
-|---|--------|------|--------|-------------------|
-| 1 | Thứ tự power/temp bị đảo | FW ↔ App | 🔴 **Nghiêm trọng** | Đổi `sprintf` hoặc `handle_data` |
-| 2 | Không có CRC/Checksum | Cả hai | 🔴 Cao | Thêm CRC8 cuối frame |
-| 3 | Không có ACK/NACK | Cả hai | 🟡 Trung bình | Thêm phản hồi `"OK\n"` sau khi nhận lệnh |
-| 4 | Baudrate không đồng bộ | App | 🟡 Trung bình | Lock 115200 hoặc handshake |
-| 5 | `data_ready` không thread-safe | App | 🟡 Trung bình | Dùng `QMutex` |
-| 6 | `power_trans=140` giả lập | FW | 🟡 Test only | Xóa trước khi deploy |
-| 7 | Buffer UART chỉ 5 byte | FW | 🟢 Thấp | Tăng lên 8 byte cho an toàn |
-| 8 | Không timeout reconnect | App | 🟢 Thấp | Thêm auto-reconnect |
-
----
-
-# PHẦN VI — ĐỀ XUẤT CẢI TIẾN
-
-## 6.1 Cải Tiến Firmware
-
-| # | Nội dung | Chi tiết |
-|---|---------|---------|
-| 1 | **Xóa dòng giả lập** | Xóa `power_trans=140;` tại main.c line 211 |
-| 2 | **Thêm CRC8** | Gửi `"power,temp,CRC\r\n"` — CRC8 tính trên payload |
-| 3 | **Phản hồi ACK** | Sau khi nhận lệnh suy hao, gửi `"ACK:XXd\r\n"` |
-| 4 | **Dùng DMA cho ADC** | Thay polling 128 lần bằng DMA circular mode, giảm CPU load |
-| 5 | **Watchdog (IWDG)** | Bảo vệ khỏi treo hệ thống |
-| 6 | **Tăng UART buffer** | Từ 5 lên ít nhất 8 byte |
-
-## 6.2 Cải Tiến App Python
-
-| # | Nội dung | Chi tiết |
-|---|---------|---------|
-| 1 | **Sửa thứ tự parse** | `parts[0]` = power (không phải temp) |
-| 2 | **Thread-safe flag** | `data_ready` dùng `QMutex` hoặc `threading.Lock()` |
-| 3 | **Hash password** | Dùng `hashlib.sha256()` thay hard-code |
-| 4 | **Sửa font path** | Dùng `resource_path()` thay `D:\...` |
-| 5 | **Refactor tab** | Dùng `QStackedWidget` thay hide/show |
-| 6 | **Auto-reconnect** | Phát hiện mất serial → tự kết nối lại |
-| 7 | **Lock baudrate** | Đồng bộ với firmware 115200 |
-| 8 | **Dọn import trùng** | Xóa import lặp (reportlab, PyQt5) |
-
-## 6.3 Đề Xuất Thêm Frame Protocol
-
-```
-Đề xuất frame mới (có CRC8):
-
-STM32 → PC:  "$P{power},T{temp}*{CRC8}\r\n"
-             Ví dụ: "$P140,T330*A7\r\n"
-
-PC → STM32:  "$A{value}*{CRC8}\r\n"
-             Ví dụ: "$A105*B3\r\n"
-
-STM32 → PC (ACK):  "$ACK{value}*{CRC8}\r\n"
-                    Ví dụ: "$ACK105*C1\r\n"
-```
-
----
-
-# PHẦN VII — TÓM TẮT
-
-Hệ thống K31-TTVT gồm **firmware STM32F407** và **ứng dụng PyQt5** hoạt động đồng bộ qua **UART 115200 baud** (USB-UART FT232). Firmware đọc nhiệt độ (LM75 qua I2C) và công suất (ADC3) rồi gửi lên PC mỗi 500ms. App hiển thị dữ liệu trên gauge widget và cho phép người dùng điều chỉnh suy hao (PE4302 qua SPI1, 0-31.5 dB).
-
-**Vấn đề nghiêm trọng nhất cần sửa ngay**: Thứ tự dữ liệu power/temperature bị đảo giữa firmware và app, dẫn đến hiển thị sai giá trị trên giao diện.
+Thuật toán phần mềm K31-TTVT được thiết kế theo kiến trúc đa luồng, đảm bảo khả năng giám sát thời gian thực các thông số thiết bị đồng thời cho phép điều khiển từ xa mức suy hao tín hiệu. Việc phân chia rõ ràng giữa nhánh giám sát (nhận dữ liệu liên tục) và nhánh điều khiển (gửi lệnh theo yêu cầu) giúp hệ thống hoạt động ổn định, đáp ứng đầy đủ yêu cầu vận hành của khối thu phát vệ tinh trong thực tế.
